@@ -1,33 +1,34 @@
 # prime-agent-manus
 
-Use [Manus](https://manus.im) as a model provider inside [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) (and any pi-based agent).
+Use [Manus](https://manus.im) as a model provider inside
+[Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) and any pi-based agent.
 
-Manus ships no terminal CLI and its API is not OpenAI-compatible, so none of Prime Agent's built-in
-API adapters reach it. This extension registers `manus` as a provider with a custom `streamSimple`,
-which presents Manus's asynchronous task API as an ordinary assistant stream.
+Manus ships no terminal CLI and its API is not OpenAI-compatible, so no built-in adapter reaches it.
+This extension registers `manus` as a provider with a custom `streamSimple`, and bridges Prime
+Agent's tools into the prompt so Manus can act on your machine: it reads files, runs commands, edits
+code, and checks its own work.
 
 ```
 /model → Manus 1.6 Lite, Manus 1.6, Manus 1.6 Max
 ```
 
-## Read this before installing
+## What to expect
 
-**Manus edits your repository through Prime Agent's tools.** The Manus API accepts no tool
-definitions and Manus lives in its own cloud sandbox, so this provider bridges the two: the tools
-Prime Agent offers are described in the prompt, a reply that asks for one ends the turn as a tool
-turn, Prime Agent runs it on your machine, and the result goes back to the same Manus task. Manus
-reasons, your machine acts. It reads files, runs commands, edits code, and checks its own work,
-the way any coding agent does.
+**A toy, and a decent reviewer.** It works, but two limits keep it away from real coding work:
 
-Two things follow from bridging rather than native tool calling:
+- **5000 estimated tokens per message.** A `task.create` or `task.sendMessage` body over that is
+  rejected outright. It caps how much of a file, and how much of the conversation, Manus can be
+  shown at once. (It caps one *message*, not the task: a Manus task keeps its own history, so what
+  it has already read stays with it across turns.)
+- **30 to 60 seconds per tool call.** Manus is an asynchronous cloud agent, reached by creating a
+  task and polling it. Adding one function to one file takes about 90 seconds. Twenty tool calls
+  take half an hour.
 
-- **The tool call is parsed out of prose**, so a reply that ignores the protocol just reads as
-  text. It recovers on the next turn; it does not corrupt anything.
-- **One call per turn.** Manus often plans several steps in one reply. The first runs, the rest
-  are dropped and proposed again with the result in hand.
+Where that stops mattering is review: it needs no long context per step, latency does not matter,
+and it finds real things. Three of the fixes in this repository's history came from Manus reviewing
+it through this bridge.
 
-Set `MANUS_TOOL_BRIDGE=0` for the earlier behaviour, where Manus answers as a text model and
-touches nothing.
+For writing code, keep a real coding model selected.
 
 ## Install
 
@@ -35,24 +36,13 @@ touches nothing.
 prime-agent package install git:github.com/coseto6125/prime-agent-manus
 ```
 
-Then authenticate. Create a key at the [Manus API console](https://open.manus.ai) and pick one of:
+Create a key at the [Manus API console](https://open.manus.ai), then pick one:
 
-**`/login` (recommended).** In the TUI, run `/login`, choose **Manus (API key)**, and paste the key.
-It is checked against the API on entry and stored in `~/.prime/agent/auth.json`, so nothing lives in
-your shell profile. `/login manus` jumps straight to it.
-
-**Environment variable.** `export MANUS_API_KEY=sk-...` before launch.
-
-**Provider config.** `~/.prime/agent/models.json`, which also takes the `!command` form so the key
-can stay in a password manager:
-
-```json
-{
-  "providers": {
-    "manus": { "apiKey": "!op read op://private/manus/api-key" }
-  }
-}
-```
+- **`/login` (recommended).** In the TUI run `/login`, choose **Manus (API key)**, paste the key.
+  It is checked against the API on entry and stored in `~/.prime/agent/auth.json`.
+- **Environment.** `export MANUS_API_KEY=sk-...`
+- **Provider config.** `~/.prime/agent/models.json`, which takes the `!command` form so the key can
+  live in a password manager: `{"providers": {"manus": {"apiKey": "!op read op://private/manus/key"}}}`
 
 Try it without installing:
 
@@ -60,8 +50,7 @@ Try it without installing:
 prime-agent -e git:github.com/coseto6125/prime-agent-manus --provider manus --model manus-1.6-lite
 ```
 
-Extensions load when Prime Agent starts, so after installing or updating this package, restart it or
-run `/reload`.
+Extensions load at startup, so after installing or updating, restart or run `/reload`.
 
 ## Configuration
 
@@ -69,29 +58,18 @@ run `/reload`.
 |---|---|
 | `MANUS_API_KEY` | API key. Required unless set through provider config. |
 | `MANUS_PROJECT_ID` | Files every task under a Manus project instead of your personal task list. |
-| `MANUS_TOOL_BRIDGE` | `0` turns off tool bridging, leaving Manus as a text model. |
+| `MANUS_TOOL_BRIDGE` | `0` turns off tool bridging, leaving Manus as a text model that touches nothing. |
 
-Model ids are Manus `agent_profile` values. `manus-1.6-lite` is cheaper and faster; a short question
-answers in roughly 7 to 10 seconds. Read the next section before choosing anything else.
+## Check which profiles your account can create
 
-## Check which profiles your account can actually create
+Model ids are Manus `agent_profile` values. The API reference says free personal accounts are
+"downgraded to `manus-1.6-lite`". What was observed instead is that no task is created at all:
+`task.create` returns `ok: true` and a `task_id` for every profile, but for `manus-1.6` and
+`manus-1.6-max` that id stays unknown to `task.detail` and `task.listMessages` forever, never
+reaches `task.list`, and moves no credits. Only `manus-1.6-lite` produced a task that exists. The
+same account runs `manus-1.6` normally in the web app, so this is about the API path.
 
-The API reference states, under `agent_profile`:
-
-> Free personal accounts are downgraded to `manus-1.6-lite` regardless of the requested value.
-
-What happens instead is that no task is created at all. On a free personal account, `task.create`
-returns `ok: true` with a `task_id` for every profile, but only `manus-1.6-lite` produced a task that
-exists. For `manus-1.6` (also the API default) and `manus-1.6-max`, the returned id stayed unknown to
-`task.detail` and `task.listMessages` indefinitely, the task never appeared in `task.list` even when
-filtering by the creating `api_key_id`, and `usage.list` recorded no credit movement for it. The v1
-endpoint `POST /v1/tasks`, which takes no profile parameter and therefore uses the `manus-1.6`
-default, behaves the same way.
-
-This is about the API path only. The same account runs `manus-1.6` normally in the Manus web app.
-
-Nothing is blocked client-side, so if the other profiles work for you they work here. Check yours in
-two commands:
+Nothing is blocked client-side. Check yours:
 
 ```bash
 TASK=$(curl -s -X POST https://api.manus.ai/v2/task.create \
@@ -101,128 +79,67 @@ TASK=$(curl -s -X POST https://api.manus.ai/v2/task.create \
 sleep 10 && curl -s "https://api.manus.ai/v2/task.detail?task_id=$TASK" -H "x-manus-api-key: $MANUS_API_KEY"
 ```
 
-`ok: true` means the profile works for you. `task not found` means you hit the same thing.
+`ok: true` means the profile works for you; `task not found` means you hit the same thing. A turn
+against such a task fails with a message naming the cause rather than a bare `task not found`.
 
-**A live task hides this.** A Manus task's `agent_profile` is fixed when it is created, and follow-up
-turns go to `task.sendMessage`, which works regardless of the model currently selected. So switching
-to `manus-1.6` mid-conversation can look like it works while the reply still comes from the original
-task. This extension keys its task cache on model id to prevent that, but it is worth knowing when
-reading anyone else's report of the behaviour, including your own.
-
-When a created task never becomes readable, the turn fails with a message naming the cause instead of
-a bare `task not found`.
+Beware that a live task hides this: `agent_profile` is fixed at creation and follow-up turns go to
+`task.sendMessage` regardless of the model selected, so switching mid-conversation can look like it
+works. This extension keys its task cache on model id to prevent that.
 
 ## How it works
 
-Manus has no streaming endpoint. One turn looks like this:
+Manus has no streaming endpoint. A turn creates a task (or sends to the live one), polls
+`task.listMessages`, and forwards each new assistant message as a text delta, so Manus's own
+progress narration renders while the task runs.
 
-1. Flatten the conversation into text and `POST /v2/task.create`.
-2. Poll `GET /v2/task.listMessages` and forward every new assistant message as a text delta, so
-   Manus's own progress narration renders while the task is still running.
-3. Stop when the newest `status_update` leaves `running`.
+Tools are bridged rather than native. The first message carries the calling protocol and a catalog
+of every tool with its JSON Schema; later turns carry a one-line reminder. A reply is scanned for a
+call as a ` ```tool_call ` fence, any JSON fence naming a tool, or a bare `{"tool": …}` object in
+the prose, with raw newlines inside JSON strings escaped first (a call carrying a shell script is
+otherwise unparseable). On a hit the turn ends with `stopReason: "toolUse"`, Prime Agent runs the
+tool locally, and the result reaches the same task through `task.sendMessage`.
 
-Follow-up turns inside one process reuse the same Manus task through `task.sendMessage`, so the task
-keeps its own history and only unseen messages are sent. A new process starts a new task and replays
-the transcript, which costs an extra task but keeps the answer correct. Switching model also starts a
-new task, because a task's `agent_profile` is fixed when it is created.
+Most of the preamble exists to stop Manus doing the work in its own sandbox, where it would edit a
+file that only exists on its side and report success for a change your repository never received.
 
-Files Manus builds (images, video, documents, generated code) come back as attachments rather than
-in the message text, which usually just says "see the attachment". Each one is appended to the reply
-as a markdown link, which the TUI renders as a clickable name instead of a few hundred characters of
-signed URL:
+Every message is measured against the 5000-token ceiling and trimmed: the catalog degrades from full
+schemas to schemas without prose to one signature per tool, tool results are cut in the middle to
+keep both ends, and the oldest messages go first so this turn's instruction survives. The estimate
+counts ASCII at four characters per token and everything else at two, because undershooting costs
+the whole request.
 
-```markdown
-[penguin.png](https://private-us-east-1.manuscdn.com/sessionFile/...)
-```
+Other behaviour worth knowing:
 
-Those links carry an expiry in their signature policy, so download anything you want to keep.
-
-Aborting the turn calls `task.stop`, so an abandoned task stops burning credits.
-
-The host's system prompt is **not** forwarded by default. Prime Agent's system prompt describes its
-own tool environment, and Manus reads that as an attachment it should go and open. Pass
-`includeSystemPrompt: true` to `createManusStream` if you want it anyway.
-
-## When Manus pauses for approval
-
-A Manus task can stop in `waiting` status when it needs an approval that only its own app can
-collect: running a terminal command, sending mail, deploying, picking video quality, or accepting a
-high-credit notice. The turn ends with a note naming what it wants and a link to the task, rather
-than a truncated answer that looks finished:
-
-> _Manus is waiting for a confirmation: Run `npm install` (`terminalExecute`). Approve it at
-> https://manus.im/app/… , then send another message here to continue._
-
-The exception is `messageAskUser`, where the agent just asked you something. Its question is already
-in the reply, so answering on the next turn resumes the task.
-
-## How tool bridging works
-
-The first message of a task carries the protocol and a catalog of every tool Prime Agent offers,
-each with its JSON Schema. Later turns carry a one-line reminder, because a long task drifts back
-to plain prose without it.
-
-A reply is scanned for a call in three forms, in this order: a fenced ` ```tool_call ` block, any
-fenced block whose JSON names a tool, and a bare `{"tool": …}` object written straight into the
-prose. Raw newlines inside a JSON string are escaped before parsing, since a call carrying a shell
-script or a Python snippet is otherwise not valid JSON.
-
-When one is found the turn ends there with `stopReason: "toolUse"`, and polling stops rather than
-waiting for the Manus task to finish. Prime Agent runs the tool and the result reaches the same
-task through `task.sendMessage`, so Manus keeps its own history across the whole loop.
-
-The preamble spends most of its words on one thing: Manus must not do the work in its own sandbox.
-Without that, it edits a file that only exists on its side and reports success for a change your
-repository never received.
-
-### The 5000-token ceiling
-
-Manus rejects any message over 5000 estimated tokens, and Prime Agent's full tool catalog passes
-that on its own, so every message is measured and trimmed to fit:
-
-- The catalog is rendered at the most detail the budget allows: full schemas with descriptions,
-  then schemas with the prose stripped, then one signature line per tool. Schemas go last, because
-  they are what makes the arguments come out right.
-- Tool results are cut in the middle, keeping head and tail, since a file read is usually wanted
-  for both.
-- The oldest messages are dropped first, so the instruction for this turn always survives.
-
-The estimate counts ASCII at four characters per token and every other character as two. Manus does
-not publish its tokenizer, and undershooting costs the whole request rather than a little room.
+- Files Manus builds arrive as attachments, appended to the reply as markdown links. The signed URLs
+  expire, so download what you want to keep.
+- Aborting calls `task.stop`, so an abandoned task stops burning credits.
+- A task can pause in `waiting` status for an approval only the Manus app can collect (terminal,
+  mail, deploy). The turn ends with a note and a link instead of a truncated answer.
+- The host system prompt is not forwarded; Manus reads it as an attachment to go and open. Pass
+  `includeSystemPrompt: true` to `createManusStream` to override.
 
 ## Limits
 
-- **No parallel tool calls.** One call per turn, by construction.
-- **A small context.** 5000 tokens per message caps how much of a file, or of the conversation,
-  Manus sees at once. Ask for a function, not a whole subsystem.
-- **No token usage or cost.** Manus bills in credits, not tokens, and returns no token counts, so
-  the cost readout stays at zero. Check credit usage in the Manus dashboard.
-- **Text-only input.** Images you send are replaced with a placeholder.
-- **Task reuse is per process**, keyed on model id plus the first user message. Two conversations
-  that open with byte-identical text on the same model share a task within one process.
+- **One tool call per turn.** Manus often plans several steps in one reply; the first runs and the
+  rest are proposed again with the result in hand.
+- **A missed call is just text.** A reply that ignores the protocol reads as prose and recovers on
+  the next turn. Nothing is corrupted.
+- **No token usage or cost.** Manus bills in credits and reports no token counts, so the cost
+  readout stays at zero.
+- **Text-only input.** Images are replaced with a placeholder.
+- **Task reuse is per process**, keyed on model id plus the first user message.
 
 ## Notes on the Manus API
 
-Documented here because the official reference is thin on both points.
+Documented here because the official reference is thin on both.
 
-`structured_output_schema` follows OpenAI strict-mode rules, and violations come back as a generic
-`invalid_argument` / "unexpected error from node server" at task creation:
-
-- every object needs `additionalProperties: false`
-- every object's `required` must list **all** of its properties (use `"type": ["string", "null"]`
-  for optional ones)
-- the schema goes in bare; wrapping it as `{ "name": ..., "schema": ... }` is rejected
+`structured_output_schema` follows OpenAI strict-mode rules, and a violation comes back as a generic
+`invalid_argument` at task creation: every object needs `additionalProperties: false`, every
+`required` must list **all** of that object's properties (use `"type": ["string", "null"]` for
+optional ones), and the schema goes in bare rather than wrapped as `{name, schema}`.
 
 Authentication uses the `x-manus-api-key` header. `Authorization: Bearer` is for OAuth tokens and
 rejects an API key with "token contains an invalid number of segments".
-
-## Roadmap
-
-`structured_output_schema` is the stricter way to carry a tool call. A schema of
-`{tool, arguments}` would come back in a dedicated `structured_output_result` message instead of
-being parsed out of prose. What stops it today is that the schema is fixed when the task is
-created, so it also constrains every plain answer in the same task. Splitting a turn into a
-free-text task and a schema-bound one costs an extra task per step.
 
 ## Development
 
