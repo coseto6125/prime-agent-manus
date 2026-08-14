@@ -356,20 +356,31 @@ describe("newAssistantText attachments", () => {
     assistant_message: { content, attachments },
   });
 
-  it("appends each attachment as a labelled link", () => {
+  it("appends each attachment as a markdown link the TUI can render", () => {
     const message = withFile("See the attachment.", 100, [
       { type: "file", filename: "clip.mp4", content_type: "video/mp4", url: "https://cdn.example/clip.mp4?sig=x" },
     ]);
 
     expect(newAssistantText([message], 0)[0].text).toBe(
-      "See the attachment.\n\n[clip.mp4 · video/mp4]\nhttps://cdn.example/clip.mp4?sig=x",
+      "See the attachment.\n\n[clip.mp4](https://cdn.example/clip.mp4?sig=x)",
+    );
+  });
+
+  it("lists several attachments one per line", () => {
+    const message = withFile("Two files.", 100, [
+      { filename: "a.png", url: "https://cdn.example/a.png" },
+      { filename: "b.pdf", url: "https://cdn.example/b.pdf" },
+    ]);
+
+    expect(newAssistantText([message], 0)[0].text).toBe(
+      "Two files.\n\n[a.png](https://cdn.example/a.png)\n[b.pdf](https://cdn.example/b.pdf)",
     );
   });
 
   it("keeps a message that carries only an attachment", () => {
     const message = withFile("", 100, [{ filename: "report.pdf", url: "https://cdn.example/report.pdf" }]);
 
-    expect(newAssistantText([message], 0)[0].text).toBe("[report.pdf]\nhttps://cdn.example/report.pdf");
+    expect(newAssistantText([message], 0)[0].text).toBe("[report.pdf](https://cdn.example/report.pdf)");
   });
 
   it("skips attachments that carry no url", () => {

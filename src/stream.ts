@@ -133,13 +133,12 @@ function emptyUsage(): AssistantMessage["usage"] {
  */
 function renderAssistant(message: ManusMessage): string {
   const body = message.assistant_message;
-  const parts = [body?.content ?? ""];
-  for (const attachment of body?.attachments ?? []) {
-    if (!attachment.url) continue;
-    const label = [attachment.filename ?? "attachment", attachment.content_type].filter(Boolean).join(" · ");
-    parts.push(`[${label}]\n${attachment.url}`);
-  }
-  return parts.filter(Boolean).join("\n\n");
+  // Markdown links, because the TUI renders them (it themes mdLink/mdLinkUrl) and a raw
+  // signed CDN URL runs to several hundred characters that would swamp the reply.
+  const links = (body?.attachments ?? [])
+    .filter((attachment) => attachment.url)
+    .map((attachment) => `[${attachment.filename ?? "attachment"}](${attachment.url})`);
+  return [body?.content ?? "", links.join("\n")].filter(Boolean).join("\n\n");
 }
 
 /** Assistant messages newer than `afterTimestamp`, oldest first. */

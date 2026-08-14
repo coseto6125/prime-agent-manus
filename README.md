@@ -117,11 +117,11 @@ new task, because a task's `agent_profile` is fixed when it is created.
 
 Files Manus builds (images, video, documents, generated code) come back as attachments rather than
 in the message text, which usually just says "see the attachment". Each one is appended to the reply
-as a labelled signed CDN link:
+as a markdown link, which the TUI renders as a clickable name instead of a few hundred characters of
+signed URL:
 
-```
-[penguin.png · image/png]
-https://private-us-east-1.manuscdn.com/sessionFile/...
+```markdown
+[penguin.png](https://private-us-east-1.manuscdn.com/sessionFile/...)
 ```
 
 Those links carry an expiry in their signature policy, so download anything you want to keep.
