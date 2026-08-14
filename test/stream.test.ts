@@ -222,6 +222,64 @@ describe("createManusStream", () => {
   });
 });
 
+describe("waiting status", () => {
+  const fast = { apiKey: "sk-test", pollIntervalMs: 1, maxPollIntervalMs: 1 };
+
+  const waiting = (eventType: string, description: string, timestamp: number): ManusMessage => ({
+    id: `w-${timestamp}`,
+    timestamp: String(timestamp),
+    type: "status_update",
+    status_update: {
+      agent_status: "waiting" as any,
+      status_detail: { waiting_for_event_id: "evt_1", waiting_for_event_type: eventType, waiting_description: description },
+    },
+  });
+
+  it("says the task paused for an approval instead of returning a half answer", async () => {
+    const now = Date.now();
+    queueResponses([
+      { ok: true, task_id: "t1" },
+      poll(assistant("About to run the install.", now + 10), waiting("terminalExecute", "Run `npm install`", now + 20)),
+    ]);
+
+    const events = await collect(createManusStream(fast)(MODEL, context("q")));
+    const text = events.at(-1).message.content[0].text;
+
+    expect(text).toContain("About to run the install.");
+    expect(text).toContain("waiting for a confirmation");
+    expect(text).toContain("Run `npm install`");
+    expect(text).toContain("https://manus.im/app/t1");
+    expect(events.at(-1).type).toBe("done");
+  });
+
+  it("stays quiet for messageAskUser, whose question is already in the reply", async () => {
+    const now = Date.now();
+    queueResponses([
+      { ok: true, task_id: "t1" },
+      poll(assistant("Which environment should I target?", now + 10), waiting("messageAskUser", "Awaiting reply", now + 20)),
+    ]);
+
+    const events = await collect(createManusStream(fast)(MODEL, context("q")));
+
+    expect(events.at(-1).message.content[0].text).toBe("Which environment should I target?");
+  });
+
+  it("names the event type when Manus sends no description", async () => {
+    const now = Date.now();
+    const bare: ManusMessage = {
+      id: "w",
+      timestamp: String(now + 20),
+      type: "status_update",
+      status_update: { agent_status: "waiting" as any, status_detail: { waiting_for_event_type: "videoGenerate" } },
+    };
+    queueResponses([{ ok: true, task_id: "t1" }, poll(assistant("Rendering.", now + 10), bare)]);
+
+    const events = await collect(createManusStream(fast)(MODEL, context("q")));
+
+    expect(events.at(-1).message.content[0].text).toContain("videoGenerate");
+  });
+});
+
 describe("dead task handling", () => {
   const fast = { apiKey: "sk-test", pollIntervalMs: 1, maxPollIntervalMs: 1 };
   const notFound = { ok: false, error: { code: "not_found", message: "task not found" } };

@@ -17,7 +17,13 @@ import {
 } from "@earendil-works/pi-ai";
 
 import { buildPromptSlice, conversationKey } from "./context-to-prompt.ts";
-import { latestAgentStatus, ManusApiError, ManusClient, type ManusMessage } from "./manus-client.ts";
+import {
+  latestStatusUpdate,
+  ManusApiError,
+  ManusClient,
+  type ManusMessage,
+  type StatusUpdate,
+} from "./manus-client.ts";
 
 export interface ManusStreamSettings {
   /** Fallback key. Prime Agent resolves the provider's configured `apiKey` and passes it per call. */
@@ -98,6 +104,20 @@ function ghostTaskError(taskId: string, profile: string): ManusApiError {
       ? "Check the task at manus.im and the account's credit balance."
       : `Manus does this for every profile except manus-1.6-lite, "${profile}" included. Switch to manus-1.6-lite.`;
   return new ManusApiError(`Manus accepted task ${taskId} but never created it. ${hint}`, 404, "not_found");
+}
+
+/**
+ * Explains a `waiting` task, which needs an approval the API caller cannot give here.
+ *
+ * `messageAskUser` is the exception: the agent simply asked a question, its text is already in
+ * the reply, and answering on the next turn resumes the task through `task.sendMessage`.
+ */
+function describeWaiting(update: StatusUpdate, taskId: string): string | undefined {
+  const detail = update.status_detail;
+  const eventType = detail?.waiting_for_event_type;
+  if (!eventType || eventType === "messageAskUser") return undefined;
+  const what = detail?.waiting_description ?? eventType;
+  return `_Manus is waiting for a confirmation: ${what} (\`${eventType}\`). Approve it at https://manus.im/app/${taskId}, then send another message here to continue._`;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -240,10 +260,22 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
         let sessionCached = false;
 
         let contentIndex = -1;
+        const pushText = (text: string): void => {
+          if (contentIndex === -1) {
+            output.content.push({ type: "text", text: "" });
+            contentIndex = output.content.length - 1;
+            stream.push({ type: "text_start", contentIndex, partial: output });
+          }
+          const block = output.content[contentIndex];
+          const delta = block.type === "text" && block.text ? `\n\n${text}` : text;
+          if (block.type === "text") block.text += delta;
+          stream.push({ type: "text_delta", contentIndex, delta, partial: output });
+        };
         let lastSeenTimestamp = sentAt - 1;
         let interval = pollIntervalMs;
         let unreadableSinceMs = 0;
         let failingSinceMs = 0;
+        let waitingNotice: string | undefined;
         const deadline = Date.now() + taskTimeoutMs;
 
         while (true) {
@@ -285,22 +317,21 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
           const fresh = newAssistantText(messages, lastSeenTimestamp);
 
           for (const entry of fresh) {
-            if (contentIndex === -1) {
-              output.content.push({ type: "text", text: "" });
-              contentIndex = output.content.length - 1;
-              stream.push({ type: "text_start", contentIndex, partial: output });
-            }
-            const block = output.content[contentIndex];
-            const delta = block.type === "text" && block.text ? `\n\n${entry.text}` : entry.text;
-            if (block.type === "text") block.text += delta;
-            stream.push({ type: "text_delta", contentIndex, delta, partial: output });
+            pushText(entry.text);
             lastSeenTimestamp = Math.max(lastSeenTimestamp, entry.timestamp);
           }
 
           // Manus stays responsive right after a burst, so back off only while it is quiet.
           interval = fresh.length > 0 ? pollIntervalMs : Math.min(interval + 1_000, maxPollIntervalMs);
 
-          const status = latestAgentStatus(messages);
+          const update = latestStatusUpdate(messages);
+          const status = update?.agent_status;
+          if (status === "waiting") {
+            // Not a finished task: it stopped for an approval. Saying so beats returning a
+            // half-answer that looks complete.
+            waitingNotice = describeWaiting(update as StatusUpdate, activeTaskId);
+            break;
+          }
           if (status && status !== "running" && status !== "pending") {
             if (status === "error") {
               output.stopReason = "error";
@@ -309,6 +340,8 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
             break;
           }
         }
+
+        if (waitingNotice) pushText(waitingNotice);
 
         if (contentIndex >= 0) {
           const block = output.content[contentIndex];

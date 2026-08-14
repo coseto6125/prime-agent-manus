@@ -132,6 +132,19 @@ The host's system prompt is **not** forwarded by default. Prime Agent's system p
 own tool environment, and Manus reads that as an attachment it should go and open. Pass
 `includeSystemPrompt: true` to `createManusStream` if you want it anyway.
 
+## When Manus pauses for approval
+
+A Manus task can stop in `waiting` status when it needs an approval that only its own app can
+collect: running a terminal command, sending mail, deploying, picking video quality, or accepting a
+high-credit notice. The turn ends with a note naming what it wants and a link to the task, rather
+than a truncated answer that looks finished:
+
+> _Manus is waiting for a confirmation: Run `npm install` (`terminalExecute`). Approve it at
+> https://manus.im/app/… , then send another message here to continue._
+
+The exception is `messageAskUser`, where the agent just asked you something. Its question is already
+in the reply, so answering on the next turn resumes the task.
+
 ## Limits
 
 - **No tool calling.** See above. Prime Agent's tool definitions are dropped.

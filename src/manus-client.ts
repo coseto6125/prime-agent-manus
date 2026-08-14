@@ -11,12 +11,21 @@ export const MANUS_BASE_URL = "https://api.manus.ai";
 /** The documented API-key header. `Authorization: Bearer` is for OAuth tokens and rejects an API key. */
 const API_KEY_HEADER = "x-manus-api-key";
 
-export type AgentStatus = "running" | "pending" | "stopped" | "completed" | "error";
+export type AgentStatus = "running" | "pending" | "waiting" | "stopped" | "completed" | "error";
+
+/** Present when `agent_status` is `waiting`: what the agent needs before it can continue. */
+export interface StatusDetail {
+  waiting_for_event_id?: string;
+  waiting_for_event_type?: string;
+  waiting_description?: string;
+  confirm_input_schema?: Record<string, unknown>;
+}
 
 export interface StatusUpdate {
   agent_status: AgentStatus;
   brief?: string;
   description?: string;
+  status_detail?: StatusDetail;
 }
 
 /** A file Manus produced in its sandbox, offered as a time-limited signed CDN URL. */
@@ -156,9 +165,13 @@ export class ManusClient {
 }
 
 /** Reads the newest status update, which is what decides whether a task is still working. */
-export function latestAgentStatus(messages: ManusMessage[]): AgentStatus | undefined {
+export function latestStatusUpdate(messages: ManusMessage[]): StatusUpdate | undefined {
   for (const message of messages) {
-    if (message.type === "status_update" && message.status_update) return message.status_update.agent_status;
+    if (message.type === "status_update" && message.status_update) return message.status_update;
   }
   return undefined;
+}
+
+export function latestAgentStatus(messages: ManusMessage[]): AgentStatus | undefined {
+  return latestStatusUpdate(messages)?.agent_status;
 }
