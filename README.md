@@ -84,6 +84,17 @@ keeps its own history and only unseen messages are sent. A new process starts a 
 the transcript, which costs an extra task but keeps the answer correct. Switching model also starts a
 new task, because a task's `agent_profile` is fixed when it is created.
 
+Files Manus builds (images, video, documents, generated code) come back as attachments rather than
+in the message text, which usually just says "see the attachment". Each one is appended to the reply
+as a labelled signed CDN link:
+
+```
+[penguin.png · image/png]
+https://private-us-east-1.manuscdn.com/sessionFile/...
+```
+
+Those links carry an expiry in their signature policy, so download anything you want to keep.
+
 Aborting the turn calls `task.stop`, so an abandoned task stops burning credits.
 
 The host's system prompt is **not** forwarded by default. Prime Agent's system prompt describes its
@@ -95,7 +106,7 @@ own tool environment, and Manus reads that as an attachment it should go and ope
 - **No tool calling.** See above. Prime Agent's tool definitions are dropped.
 - **No token usage or cost.** Manus bills in credits, not tokens, and returns no token counts, so
   the cost readout stays at zero. Check credit usage in the Manus dashboard.
-- **Text only.** Images in the conversation are replaced with a placeholder.
+- **Text-only input.** Images you send are replaced with a placeholder.
 - **Task reuse is per process**, keyed on model id plus the first user message. Two conversations
   that open with byte-identical text on the same model share a task within one process.
 

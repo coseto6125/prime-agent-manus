@@ -98,11 +98,28 @@ function emptyUsage(): AssistantMessage["usage"] {
   };
 }
 
+/**
+ * Renders one assistant message, including any files Manus built.
+ *
+ * Attachments arrive as signed CDN links that expire, and the text usually just says
+ * "see the attachment", so dropping them loses the actual deliverable.
+ */
+function renderAssistant(message: ManusMessage): string {
+  const body = message.assistant_message;
+  const parts = [body?.content ?? ""];
+  for (const attachment of body?.attachments ?? []) {
+    if (!attachment.url) continue;
+    const label = [attachment.filename ?? "attachment", attachment.content_type].filter(Boolean).join(" · ");
+    parts.push(`[${label}]\n${attachment.url}`);
+  }
+  return parts.filter(Boolean).join("\n\n");
+}
+
 /** Assistant messages newer than `afterTimestamp`, oldest first. */
 export function newAssistantText(messages: ManusMessage[], afterTimestamp: number): { text: string; timestamp: number }[] {
   return messages
     .filter((message) => message.type === "assistant_message" && Number(message.timestamp) > afterTimestamp)
-    .map((message) => ({ text: message.assistant_message?.content ?? "", timestamp: Number(message.timestamp) }))
+    .map((message) => ({ text: renderAssistant(message), timestamp: Number(message.timestamp) }))
     .filter((entry) => entry.text.length > 0)
     .sort((a, b) => a.timestamp - b.timestamp);
 }

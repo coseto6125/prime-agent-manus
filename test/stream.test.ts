@@ -222,6 +222,37 @@ describe("createManusStream", () => {
   });
 });
 
+describe("newAssistantText attachments", () => {
+  const withFile = (content: string, timestamp: number, attachments: any[]): ManusMessage => ({
+    id: `a-${timestamp}`,
+    timestamp: String(timestamp),
+    type: "assistant_message",
+    assistant_message: { content, attachments },
+  });
+
+  it("appends each attachment as a labelled link", () => {
+    const message = withFile("See the attachment.", 100, [
+      { type: "file", filename: "clip.mp4", content_type: "video/mp4", url: "https://cdn.example/clip.mp4?sig=x" },
+    ]);
+
+    expect(newAssistantText([message], 0)[0].text).toBe(
+      "See the attachment.\n\n[clip.mp4 · video/mp4]\nhttps://cdn.example/clip.mp4?sig=x",
+    );
+  });
+
+  it("keeps a message that carries only an attachment", () => {
+    const message = withFile("", 100, [{ filename: "report.pdf", url: "https://cdn.example/report.pdf" }]);
+
+    expect(newAssistantText([message], 0)[0].text).toBe("[report.pdf]\nhttps://cdn.example/report.pdf");
+  });
+
+  it("skips attachments that carry no url", () => {
+    const message = withFile("done", 100, [{ filename: "broken.bin" }]);
+
+    expect(newAssistantText([message], 0)[0].text).toBe("done");
+  });
+});
+
 describe("newAssistantText", () => {
   it("keeps only messages newer than the cutoff, oldest first", () => {
     const messages = [assistant("newest", 300), assistant("older", 100), assistant("middle", 200)];

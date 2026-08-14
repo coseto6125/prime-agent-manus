@@ -19,12 +19,20 @@ export interface StatusUpdate {
   description?: string;
 }
 
+/** A file Manus produced in its sandbox, offered as a time-limited signed CDN URL. */
+export interface ManusAttachment {
+  type?: string;
+  filename?: string;
+  content_type?: string;
+  url?: string;
+}
+
 export interface ManusMessage {
   id: string;
   timestamp: string;
   type: "user_message" | "assistant_message" | "status_update" | "structured_output_result" | string;
   user_message?: { content: string; message_type?: string };
-  assistant_message?: { content: string };
+  assistant_message?: { content: string; attachments?: ManusAttachment[] };
   status_update?: StatusUpdate;
   structured_output_result?: { success: boolean; value?: unknown };
 }
