@@ -45,6 +45,8 @@ export interface ManusStreamSettings {
    * repository instead of only talking about it. On by default when the caller sends tools.
    */
   bridgeTools?: boolean;
+  /** Token ceiling per message sent to Manus. Manus rejects anything over 5000 estimated tokens. */
+  maxMessageTokens?: number;
   /** How long a new task may stay unreadable before it is reported as never created. */
   ghostTaskGraceMs?: number;
   /** How long network errors and 5xx are ridden out before the turn fails. */
@@ -55,6 +57,12 @@ interface TaskSession {
   taskId: string;
   /** How many Prime Agent messages this task has already been told about. */
   covered: number;
+  /**
+   * Manus message ids already forwarded. Ids rather than a timestamp cutoff: Manus stamps
+   * several messages with the same value, and a cutoff drops every one that lands after the
+   * first of them was read.
+   */
+  seen: Set<string>;
 }
 
 /** Conversation key to live Manus task. Lets a multi-turn chat stay inside one task. */
@@ -168,13 +176,13 @@ function renderAssistant(message: ManusMessage): string {
   return [body?.content ?? "", links.join("\n")].filter(Boolean).join("\n\n");
 }
 
-/** Assistant messages newer than `afterTimestamp`, oldest first. */
-export function newAssistantText(messages: ManusMessage[], afterTimestamp: number): { text: string; timestamp: number }[] {
+/** Assistant messages not yet forwarded, oldest first. */
+export function newAssistantText(messages: ManusMessage[], seen: Set<string>): { text: string; id: string }[] {
   return messages
-    .filter((message) => message.type === "assistant_message" && Number(message.timestamp) > afterTimestamp)
-    .map((message) => ({ text: renderAssistant(message), timestamp: Number(message.timestamp) }))
-    .filter((entry) => entry.text.length > 0)
-    .sort((a, b) => a.timestamp - b.timestamp);
+    .filter((message) => message.type === "assistant_message" && !seen.has(message.id))
+    .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
+    .map((message) => ({ text: renderAssistant(message), id: message.id }))
+    .filter((entry) => entry.text.length > 0);
 }
 
 export function createManusStream(settings: ManusStreamSettings = {}) {
@@ -226,6 +234,7 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
         const slice = buildPromptSlice(context, existing?.covered ?? 0, {
           includeSystemPrompt: settings.includeSystemPrompt,
           bridgeTools,
+          maxTokens: settings.maxMessageTokens,
         });
 
         // A follow-up with nothing new to say would leave the task idle forever.
@@ -235,7 +244,6 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
           return;
         }
 
-        const sentAt = Date.now();
         if (existing) {
           activeTaskId = existing.taskId;
           try {
@@ -280,7 +288,9 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
           if (block.type === "text") block.text += delta;
           stream.push({ type: "text_delta", contentIndex, delta, partial: output });
         };
-        let lastSeenTimestamp = sentAt - 1;
+        // Carried across turns: a follow-up poll returns the whole task history, and only the
+        // ids this conversation has not shown yet are new.
+        const seen = existing?.seen ?? new Set<string>();
         let interval = pollIntervalMs;
         let unreadableSinceMs = 0;
         let failingSinceMs = 0;
@@ -321,13 +331,13 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
           unreadableSinceMs = 0;
           failingSinceMs = 0;
           if (!sessionCached) {
-            rememberSession(key, { taskId: activeTaskId, covered: slice.covered });
+            rememberSession(key, { taskId: activeTaskId, covered: slice.covered, seen });
             sessionCached = true;
           }
-          const fresh = newAssistantText(messages, lastSeenTimestamp);
+          const fresh = newAssistantText(messages, seen);
 
           for (const entry of fresh) {
-            lastSeenTimestamp = Math.max(lastSeenTimestamp, entry.timestamp);
+            seen.add(entry.id);
             const { text, call } = bridgeTools ? extractToolCall(entry.text) : { text: entry.text, call: undefined };
             if (text) pushText(text);
             if (!call) continue;
@@ -335,7 +345,7 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
             // result reaches the same task on the next turn, so the task keeps its own history.
             pendingToolCall = {
               type: "toolCall",
-              id: `manus_${activeTaskId}_${entry.timestamp}`,
+              id: `manus_${activeTaskId}_${entry.id}`,
               name: call.name,
               arguments: call.arguments,
             };

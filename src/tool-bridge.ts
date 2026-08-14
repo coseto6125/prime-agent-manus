@@ -12,11 +12,29 @@ import type { Tool } from "@earendil-works/pi-ai";
 /** Fence label asked for in the protocol. Alternatives are accepted when parsing. */
 export const TOOL_CALL_FENCE = "tool_call";
 
-/** Ceiling per tool description. Keeps a 40-tool catalog inside one reasonable Manus message. */
-const MAX_DESCRIPTION_CHARS = 1_500;
+/**
+ * Manus rejects a message over 5000 estimated tokens with `invalid_argument`, and a full tool
+ * catalog alone passes that on its own. Everything sent is measured against this budget.
+ */
+export const MAX_MESSAGE_TOKENS = 4_600;
 
-/** Ceiling per tool result. A whole-file read can be megabytes; Manus only needs the head. */
-const MAX_TOOL_RESULT_CHARS = 24_000;
+/**
+ * Rough token count, deliberately pessimistic.
+ *
+ * Manus does not publish its tokenizer. English and code run near 4 characters per token; a CJK
+ * character is one token in the common case and two or three when it is rarer, so each one counts
+ * as two here. Overshooting costs a little room in the prompt. Undershooting costs the whole
+ * request, which Manus rejects outright.
+ */
+export function estimateTokens(text: string): number {
+  let ascii = 0;
+  let wide = 0;
+  for (const char of text) {
+    if ((char.codePointAt(0) ?? 0) < 128) ascii++;
+    else wide++;
+  }
+  return Math.ceil(ascii / 4) + wide * 2;
+}
 
 export interface ParsedToolCall {
   name: string;
@@ -29,8 +47,23 @@ function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}\n…[truncated, ${text.length - limit} more characters]`;
 }
 
-export function truncateToolResult(text: string): string {
-  return truncate(text, MAX_TOOL_RESULT_CHARS);
+/**
+ * Trims text to a token budget, keeping both ends.
+ *
+ * A tool result is worth this treatment: a file read carries its imports at the top and the
+ * function under discussion further down, and a head-only cut throws away the half that
+ * prompted the read.
+ */
+export function fitToTokens(text: string, budget: number): string {
+  if (budget <= 0) return "";
+  if (estimateTokens(text) <= budget) return text;
+  // Convert the budget to characters at this text's own density, then split it head and tail.
+  const perToken = text.length / Math.max(1, estimateTokens(text));
+  const keep = Math.max(200, Math.floor(budget * perToken) - 80);
+  const head = Math.ceil(keep * 0.6);
+  const tail = keep - head;
+  const dropped = text.length - keep;
+  return `${text.slice(0, head)}\n…[${dropped} characters omitted]…\n${text.slice(text.length - tail)}`;
 }
 
 /**
@@ -81,15 +114,71 @@ export function toolProtocolReminder(): string {
   ].join("\n");
 }
 
-/** One line per tool plus its JSON Schema, which is what Manus needs to fill arguments correctly. */
-export function renderToolCatalog(tools: Tool[]): string {
-  const entries = tools.map((tool) => {
-    const description = truncate(tool.description ?? "", MAX_DESCRIPTION_CHARS);
-    return [`### ${tool.name}`, description, `parameters: ${JSON.stringify(tool.parameters ?? {})}`]
-      .filter(Boolean)
-      .join("\n");
+/** Drops the prose fields of a JSON Schema, which Manus can do without when space is short. */
+function stripSchemaDocs(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(stripSchemaDocs);
+  if (!schema || typeof schema !== "object") return schema;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === "description" || key === "title" || key === "examples" || key === "default" || key === "$comment") continue;
+    out[key] = stripSchemaDocs(value);
+  }
+  return out;
+}
+
+/** `path: string, recursive?: boolean` — enough to call the tool, a fraction of the schema's size. */
+function signatureOf(schema: unknown): string {
+  const object = (schema ?? {}) as { properties?: Record<string, { type?: unknown }>; required?: string[] };
+  const required = new Set(object.required ?? []);
+  const names = Object.entries(object.properties ?? {}).map(([name, property]) => {
+    const type = Array.isArray(property?.type) ? property.type.join("|") : (property?.type ?? "any");
+    return `${name}${required.has(name) ? "" : "?"}: ${type}`;
   });
-  return [`## Tools available on the user's machine (${tools.length})`, ...entries].join("\n\n");
+  return names.join(", ");
+}
+
+type Detail = "full" | "lean" | "minimal";
+
+function renderTool(tool: Tool, detail: Detail): string {
+  const first = (tool.description ?? "").split(/(?<=\.)\s/)[0] ?? "";
+  switch (detail) {
+    case "full":
+      return [`### ${tool.name}`, truncate(tool.description ?? "", 900), `parameters: ${JSON.stringify(tool.parameters ?? {})}`]
+        .filter(Boolean)
+        .join("\n");
+    case "lean":
+      return [
+        `### ${tool.name}`,
+        truncate(tool.description ?? "", 240),
+        `parameters: ${JSON.stringify(stripSchemaDocs(tool.parameters ?? {}))}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    case "minimal":
+      return `- ${tool.name}(${signatureOf(tool.parameters)}) — ${truncate(first, 100)}`;
+  }
+}
+
+/**
+ * The tool list Manus works from, rendered at the most detail the budget allows.
+ *
+ * Schemas are what make the arguments come out right, so they are the last thing given up.
+ * A catalog that will not fit even at minimum detail loses trailing tools rather than the
+ * whole message, and says so, because a truncated catalog still lets most work proceed.
+ */
+export function renderToolCatalog(tools: Tool[], budgetTokens = Number.POSITIVE_INFINITY): string {
+  const header = `## Tools available on the user's machine (${tools.length})`;
+  const build = (detail: Detail, take = tools.length) =>
+    [header, ...tools.slice(0, take).map((tool) => renderTool(tool, detail))].join(detail === "minimal" ? "\n" : "\n\n");
+
+  for (const detail of ["full", "lean", "minimal"] as Detail[]) {
+    const rendered = build(detail);
+    if (estimateTokens(rendered) <= budgetTokens) return rendered;
+  }
+
+  let take = tools.length;
+  while (take > 1 && estimateTokens(build("minimal", take)) > budgetTokens) take--;
+  return `${build("minimal", take)}\n- …[${tools.length - take} more tools omitted for space]`;
 }
 
 /** Fenced blocks in order, whatever the info string says. */
@@ -106,13 +195,18 @@ function fencedBlocks(text: string): { body: string; start: number; end: number 
  * Bare `{"tool": …}` objects written straight into the prose, which is what Manus does on
  * follow-up turns once the fenced example has scrolled out of its own attention.
  *
- * Candidate starts come from a cheap regex; each one is then scanned for its matching brace,
- * because a tool call carries nested objects and strings that a regex cannot balance.
+ * Every `{` that has a tool key within reach is a candidate, and each is then scanned for its
+ * matching brace, because a call carries nested objects and strings that a regex cannot balance.
  */
+const LOOKAHEAD_CHARS = 400;
+
 function bareCandidates(text: string): { body: string; start: number; end: number }[] {
   const found: { body: string; start: number; end: number }[] = [];
-  for (const match of text.matchAll(/\{\s*"(?:tool|tool_name|name)"\s*:/g)) {
+  for (const match of text.matchAll(/\{/g)) {
     const start = match.index ?? 0;
+    // A tool key anywhere near the front, not only as the first key: Manus writes
+    // `{"arguments": {…}, "tool": "read"}` as readily as the other order.
+    if (!/"(?:tool|tool_name)"\s*:/.test(text.slice(start, start + LOOKAHEAD_CHARS))) continue;
     let depth = 0;
     let inString = false;
     let escaped = false;

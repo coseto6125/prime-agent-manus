@@ -175,9 +175,26 @@ The preamble spends most of its words on one thing: Manus must not do the work i
 Without that, it edits a file that only exists on its side and reports success for a change your
 repository never received.
 
+### The 5000-token ceiling
+
+Manus rejects any message over 5000 estimated tokens, and Prime Agent's full tool catalog passes
+that on its own, so every message is measured and trimmed to fit:
+
+- The catalog is rendered at the most detail the budget allows: full schemas with descriptions,
+  then schemas with the prose stripped, then one signature line per tool. Schemas go last, because
+  they are what makes the arguments come out right.
+- Tool results are cut in the middle, keeping head and tail, since a file read is usually wanted
+  for both.
+- The oldest messages are dropped first, so the instruction for this turn always survives.
+
+The estimate counts ASCII at four characters per token and every other character as two. Manus does
+not publish its tokenizer, and undershooting costs the whole request rather than a little room.
+
 ## Limits
 
 - **No parallel tool calls.** One call per turn, by construction.
+- **A small context.** 5000 tokens per message caps how much of a file, or of the conversation,
+  Manus sees at once. Ask for a function, not a whole subsystem.
 - **No token usage or cost.** Manus bills in credits, not tokens, and returns no token counts, so
   the cost readout stays at zero. Check credit usage in the Manus dashboard.
 - **Text-only input.** Images you send are replaced with a placeholder.

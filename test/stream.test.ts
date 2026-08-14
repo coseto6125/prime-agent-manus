@@ -419,7 +419,7 @@ describe("newAssistantText attachments", () => {
       { type: "file", filename: "clip.mp4", content_type: "video/mp4", url: "https://cdn.example/clip.mp4?sig=x" },
     ]);
 
-    expect(newAssistantText([message], 0)[0].text).toBe(
+    expect(newAssistantText([message], new Set())[0].text).toBe(
       "See the attachment.\n\n[clip.mp4](https://cdn.example/clip.mp4?sig=x)",
     );
   });
@@ -430,7 +430,7 @@ describe("newAssistantText attachments", () => {
       { filename: "b.pdf", url: "https://cdn.example/b.pdf" },
     ]);
 
-    expect(newAssistantText([message], 0)[0].text).toBe(
+    expect(newAssistantText([message], new Set())[0].text).toBe(
       "Two files.\n\n[a.png](https://cdn.example/a.png)\n[b.pdf](https://cdn.example/b.pdf)",
     );
   });
@@ -438,27 +438,66 @@ describe("newAssistantText attachments", () => {
   it("keeps a message that carries only an attachment", () => {
     const message = withFile("", 100, [{ filename: "report.pdf", url: "https://cdn.example/report.pdf" }]);
 
-    expect(newAssistantText([message], 0)[0].text).toBe("[report.pdf](https://cdn.example/report.pdf)");
+    expect(newAssistantText([message], new Set())[0].text).toBe("[report.pdf](https://cdn.example/report.pdf)");
   });
 
   it("skips attachments that carry no url", () => {
     const message = withFile("done", 100, [{ filename: "broken.bin" }]);
 
-    expect(newAssistantText([message], 0)[0].text).toBe("done");
+    expect(newAssistantText([message], new Set())[0].text).toBe("done");
   });
 });
 
 describe("newAssistantText", () => {
-  it("keeps only messages newer than the cutoff, oldest first", () => {
+  it("skips ids already forwarded and returns the rest oldest first", () => {
     const messages = [assistant("newest", 300), assistant("older", 100), assistant("middle", 200)];
 
-    expect(newAssistantText(messages, 150).map((entry) => entry.text)).toEqual(["middle", "newest"]);
+    expect(newAssistantText(messages, new Set(["a-100"])).map((entry) => entry.text)).toEqual(["middle", "newest"]);
   });
 
   it("ignores non-assistant messages and empty content", () => {
     const messages = [assistant("", 200), status("running", 300), { id: "u", timestamp: "400", type: "user_message", user_message: { content: "hi" } } as ManusMessage];
 
-    expect(newAssistantText(messages, 0)).toEqual([]);
+    expect(newAssistantText(messages, new Set())).toEqual([]);
+  });
+});
+
+describe("messages that share a timestamp", () => {
+  const fast = { apiKey: "sk-test", pollIntervalMs: 1, maxPollIntervalMs: 1 };
+  const stamped = (id: string, content: string, timestamp: number): ManusMessage => ({
+    id,
+    timestamp: String(timestamp),
+    type: "assistant_message",
+    assistant_message: { content },
+  });
+
+  it("forwards a message that arrives late under a timestamp already seen", async () => {
+    const now = Date.now();
+    queueResponses([
+      { ok: true, task_id: "t1" },
+      poll(status("running", now + 10), stamped("m1", "first", now + 20)),
+      poll(status("running", now + 10), stamped("m1", "first", now + 20), stamped("m2", "second", now + 20), status("stopped", now + 30)),
+    ]);
+
+    const events = await collect(createManusStream(fast)(MODEL, context("question")));
+
+    expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual([
+      "first",
+      "\n\nsecond",
+    ]);
+  });
+
+  it("shows each message once when a poll repeats the whole history", async () => {
+    const now = Date.now();
+    queueResponses([
+      { ok: true, task_id: "t1" },
+      poll(status("running", now + 10), stamped("m1", "only", now + 20)),
+      poll(status("running", now + 10), stamped("m1", "only", now + 20), status("stopped", now + 30)),
+    ]);
+
+    const events = await collect(createManusStream(fast)(MODEL, context("question")));
+
+    expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual(["only"]);
   });
 });
 

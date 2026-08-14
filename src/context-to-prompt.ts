@@ -8,7 +8,14 @@
 
 import type { Context, Message } from "@earendil-works/pi-ai";
 
-import { renderToolCatalog, toolProtocolPreamble, toolProtocolReminder, truncateToolResult } from "./tool-bridge.ts";
+import {
+  estimateTokens,
+  fitToTokens,
+  MAX_MESSAGE_TOKENS,
+  renderToolCatalog,
+  toolProtocolPreamble,
+  toolProtocolReminder,
+} from "./tool-bridge.ts";
 
 /**
  * Manus runs in its own cloud sandbox and cannot touch the caller's filesystem. Without
@@ -54,11 +61,37 @@ function renderMessage(message: Message): string {
     }
     case "toolResult": {
       const label = message.isError ? "Tool error" : "Tool result";
-      return `${label} (${message.toolName}):\n${truncateToolResult(textOf(message.content))}`;
+      return `${label} (${message.toolName}):\n${textOf(message.content)}`;
     }
     default:
       return "";
   }
+}
+
+/** Cost of the `\n\n---\n\n` that joins two sections. */
+const SEPARATOR_TOKENS = 3;
+
+/**
+ * Keeps the newest messages that fit.
+ *
+ * The turn's own instruction is the last message, so dropping from the front is what keeps the
+ * request intact. A single message too large on its own (a whole-file read) is cut in the middle
+ * rather than dropped, since its head and tail are both what Manus asked to see.
+ */
+function fitTranscript(parts: string[], budget: number): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (let index = parts.length - 1; index >= 0; index--) {
+    const remaining = budget - used;
+    if (remaining <= 0) {
+      kept.unshift("[earlier messages omitted for length]");
+      break;
+    }
+    const part = estimateTokens(parts[index]) <= remaining ? parts[index] : fitToTokens(parts[index], remaining);
+    kept.unshift(part);
+    used += estimateTokens(part) + SEPARATOR_TOKENS;
+  }
+  return kept.join("\n\n");
 }
 
 export interface PromptSlice {
@@ -79,6 +112,8 @@ export interface PromptOptions {
    * machine through the host. Off means Manus answers as a text model.
    */
   bridgeTools?: boolean;
+  /** Token ceiling for the whole message. Manus rejects anything over 5000 estimated tokens. */
+  maxTokens?: number;
 }
 
 /**
@@ -97,21 +132,36 @@ export function buildPromptSlice(context: Context, alreadySent = 0, options: Pro
 
   const tools = context.tools ?? [];
   const bridging = Boolean(options.bridgeTools) && tools.length > 0;
+  const budget = options.maxTokens ?? MAX_MESSAGE_TOKENS;
 
   const sections: string[] = [];
+  const spend = (text: string) => {
+    sections.push(text);
+    return estimateTokens(text) + SEPARATOR_TOKENS;
+  };
+
+  let used = 0;
   if (isFirstTurn) {
-    sections.push(bridging ? toolProtocolPreamble() : ENVIRONMENT_PREAMBLE);
-    if (bridging) sections.push(renderToolCatalog(tools));
-    if (options.includeSystemPrompt && context.systemPrompt) {
-      sections.push(`System instructions from the caller:\n${context.systemPrompt}`);
-    }
+    used += spend(bridging ? toolProtocolPreamble() : ENVIRONMENT_PREAMBLE);
+  }
+  // Reserved before the catalog so the protocol reminder never gets squeezed out by it.
+  const reminder = bridging && !isFirstTurn ? toolProtocolReminder() : "";
+  const reserved = reminder ? estimateTokens(reminder) + SEPARATOR_TOKENS : 0;
+
+  if (isFirstTurn && bridging) {
+    // Just over half of what is left: the catalog is useless truncated, and so is a transcript
+    // cut down to nothing. Both sides get a workable share.
+    used += spend(renderToolCatalog(tools, Math.floor((budget - used - reserved) * 0.55)));
+  }
+  if (isFirstTurn && options.includeSystemPrompt && context.systemPrompt) {
+    used += spend(`System instructions from the caller:\n${context.systemPrompt}`);
   }
 
-  const transcript = pending.map(renderMessage).filter(Boolean).join("\n\n");
-  if (transcript) sections.push(transcript);
+  const transcript = fitTranscript(pending.map(renderMessage).filter(Boolean), budget - used - reserved);
+  if (transcript) used += spend(transcript);
   // Restated every turn, and last, because Manus drifts back to plain prose several turns
   // after the protocol was stated at task creation.
-  if (bridging && !isFirstTurn) sections.push(toolProtocolReminder());
+  if (reminder) sections.push(reminder);
 
   return { text: sections.join("\n\n---\n\n"), covered: messages.length };
 }

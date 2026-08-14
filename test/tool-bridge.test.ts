@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { extractToolCall, renderToolCatalog, truncateToolResult } from "../src/tool-bridge.ts";
+import { estimateTokens, extractToolCall, fitToTokens, renderToolCatalog } from "../src/tool-bridge.ts";
 
 const fence = (label: string, body: string) => "```" + label + "\n" + body + "\n```";
 
@@ -86,15 +86,63 @@ describe("renderToolCatalog", () => {
   });
 });
 
-describe("truncateToolResult", () => {
-  it("passes a normal result through untouched", () => {
-    expect(truncateToolResult("ok")).toBe("ok");
+describe("fitToTokens", () => {
+  it("passes text that already fits through untouched", () => {
+    expect(fitToTokens("ok", 100)).toBe("ok");
   });
 
-  it("trims a whole-file read and says how much was dropped", () => {
-    const trimmed = truncateToolResult("y".repeat(50_000));
+  it("keeps both ends of an oversized read, since both are why it was read", () => {
+    const text = `HEAD${"y".repeat(50_000)}TAIL`;
 
-    expect(trimmed).toContain("truncated, 26000 more characters");
+    const trimmed = fitToTokens(text, 500);
+
+    expect(trimmed.startsWith("HEAD")).toBe(true);
+    expect(trimmed.endsWith("TAIL")).toBe(true);
+    expect(trimmed).toContain("characters omitted");
+    expect(estimateTokens(trimmed)).toBeLessThanOrEqual(500);
+  });
+});
+
+describe("estimateTokens", () => {
+  it("counts ascii at four characters per token", () => {
+    expect(estimateTokens("abcdefgh")).toBe(2);
+  });
+
+  it("counts a CJK character as two, since undershooting costs the whole request", () => {
+    expect(estimateTokens("中文字")).toBe(6);
+  });
+});
+
+describe("catalog budget", () => {
+  const tools = Array.from({ length: 10 }, (_, index) => ({
+    name: `tool_${index}`,
+    description: "d".repeat(2_000),
+    parameters: {
+      type: "object",
+      required: ["path"],
+      properties: { path: { type: "string", description: "e".repeat(500) }, deep: { type: "boolean" } },
+    },
+  })) as any;
+
+  it("drops schema prose before it drops schemas", () => {
+    const catalog = renderToolCatalog(tools, 1_200);
+
+    expect(estimateTokens(catalog)).toBeLessThanOrEqual(1_200);
+    expect(catalog).toContain("tool_9");
+    expect(catalog).toContain('"properties"');
+  });
+
+  it("falls back to signatures when even lean schemas do not fit", () => {
+    const catalog = renderToolCatalog(tools, 380);
+
+    expect(estimateTokens(catalog)).toBeLessThanOrEqual(380);
+    expect(catalog).toContain("tool_0(path: string, deep?: boolean)");
+  });
+
+  it("says so when tools had to be left out entirely", () => {
+    const catalog = renderToolCatalog(tools, 60);
+
+    expect(catalog).toContain("more tools omitted");
   });
 });
 
