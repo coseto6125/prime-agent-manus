@@ -65,11 +65,19 @@ answers in roughly 7 to 10 seconds. Read the next section before choosing anythi
 
 ## Check which profiles your account can actually create
 
-On the account this was built against, `task.create` returns `ok: true` with a `task_id` for every
-profile, but only `manus-1.6-lite` produced a task that exists. For `manus-1.6` (also the API
-default) and `manus-1.6-max`, the returned id stayed unknown to `task.detail` and `task.listMessages`
-indefinitely, and the task never appeared in `task.list`, not even when filtering by the creating
-`api_key_id`.
+The API reference states, under `agent_profile`:
+
+> Free personal accounts are downgraded to `manus-1.6-lite` regardless of the requested value.
+
+What happens instead is that no task is created at all. On a free personal account, `task.create`
+returns `ok: true` with a `task_id` for every profile, but only `manus-1.6-lite` produced a task that
+exists. For `manus-1.6` (also the API default) and `manus-1.6-max`, the returned id stayed unknown to
+`task.detail` and `task.listMessages` indefinitely, the task never appeared in `task.list` even when
+filtering by the creating `api_key_id`, and `usage.list` recorded no credit movement for it. The v1
+endpoint `POST /v1/tasks`, which takes no profile parameter and therefore uses the `manus-1.6`
+default, behaves the same way.
+
+This is about the API path only. The same account runs `manus-1.6` normally in the Manus web app.
 
 Nothing is blocked client-side, so if the other profiles work for you they work here. Check yours in
 two commands:
