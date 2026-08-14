@@ -13,10 +13,12 @@ import {
   type Context,
   type Model,
   type SimpleStreamOptions,
+  type ToolCall,
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 
 import { buildPromptSlice, conversationKey } from "./context-to-prompt.ts";
+import { extractToolCall } from "./tool-bridge.ts";
 import {
   latestStatusUpdate,
   ManusApiError,
@@ -38,6 +40,11 @@ export interface ManusStreamSettings {
   projectId?: string;
   /** Forward the host's system prompt to Manus. See PromptOptions for why this is off by default. */
   includeSystemPrompt?: boolean;
+  /**
+   * Let Manus drive the caller's tools, which is what makes it able to edit the user's
+   * repository instead of only talking about it. On by default when the caller sends tools.
+   */
+  bridgeTools?: boolean;
   /** How long a new task may stay unreadable before it is reported as never created. */
   ghostTaskGraceMs?: number;
   /** How long network errors and 5xx are ridden out before the turn fails. */
@@ -176,6 +183,7 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
   const taskTimeoutMs = settings.taskTimeoutMs ?? DEFAULTS.taskTimeoutMs;
   const ghostTaskGraceMs = settings.ghostTaskGraceMs ?? GHOST_TASK_GRACE_MS;
   const transientGraceMs = settings.transientGraceMs ?? TRANSIENT_GRACE_MS;
+  const bridgeTools = settings.bridgeTools ?? true;
 
   return function streamManus(
     model: Model<any>,
@@ -217,6 +225,7 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
         const existing = sessions.get(key);
         const slice = buildPromptSlice(context, existing?.covered ?? 0, {
           includeSystemPrompt: settings.includeSystemPrompt,
+          bridgeTools,
         });
 
         // A follow-up with nothing new to say would leave the task idle forever.
@@ -276,6 +285,7 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
         let unreadableSinceMs = 0;
         let failingSinceMs = 0;
         let waitingNotice: string | undefined;
+        let pendingToolCall: ToolCall | undefined;
         const deadline = Date.now() + taskTimeoutMs;
 
         while (true) {
@@ -317,9 +327,21 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
           const fresh = newAssistantText(messages, lastSeenTimestamp);
 
           for (const entry of fresh) {
-            pushText(entry.text);
             lastSeenTimestamp = Math.max(lastSeenTimestamp, entry.timestamp);
+            const { text, call } = bridgeTools ? extractToolCall(entry.text) : { text: entry.text, call: undefined };
+            if (text) pushText(text);
+            if (!call) continue;
+            // Manus asked the host to act. The turn ends here; Prime Agent runs the tool and the
+            // result reaches the same task on the next turn, so the task keeps its own history.
+            pendingToolCall = {
+              type: "toolCall",
+              id: `manus_${activeTaskId}_${entry.timestamp}`,
+              name: call.name,
+              arguments: call.arguments,
+            };
+            break;
           }
+          if (pendingToolCall) break;
 
           // Manus stays responsive right after a burst, so back off only while it is quiet.
           interval = fresh.length > 0 ? pollIntervalMs : Math.min(interval + 1_000, maxPollIntervalMs);
@@ -353,10 +375,24 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
           });
         }
 
+        if (pendingToolCall) {
+          output.content.push(pendingToolCall);
+          const toolIndex = output.content.length - 1;
+          stream.push({ type: "toolcall_start", contentIndex: toolIndex, partial: output });
+          stream.push({
+            type: "toolcall_delta",
+            contentIndex: toolIndex,
+            delta: JSON.stringify(pendingToolCall.arguments),
+            partial: output,
+          });
+          stream.push({ type: "toolcall_end", contentIndex: toolIndex, toolCall: pendingToolCall, partial: output });
+          output.stopReason = "toolUse";
+        }
+
         if (output.stopReason === "error") {
           stream.push({ type: "error", reason: "error", error: output });
         } else {
-          stream.push({ type: "done", reason: "stop", message: output });
+          stream.push({ type: "done", reason: output.stopReason === "toolUse" ? "toolUse" : "stop", message: output });
         }
         stream.end();
       } catch (error) {

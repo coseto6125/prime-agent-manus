@@ -461,3 +461,103 @@ describe("newAssistantText", () => {
     expect(newAssistantText(messages, 0)).toEqual([]);
   });
 });
+
+describe("tool bridging", () => {
+  const fast = { apiKey: "sk-test", pollIntervalMs: 1, maxPollIntervalMs: 1 };
+  const toolContext = (text: string) =>
+    ({
+      messages: [{ role: "user" as const, content: text, timestamp: 1 }],
+      tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
+    }) as any;
+  const fenced = (body: string) => "```tool_call\n" + body + "\n```";
+
+  it("ends the turn as toolUse when Manus asks the host to run a tool", async () => {
+    const now = Date.now();
+    queueResponses([
+      { ok: true, task_id: "t1" },
+      poll(status("running", now + 10), assistant(`Reading it.\n\n${fenced('{"tool": "read", "arguments": {"path": "a.ts"}}')}`, now + 20)),
+    ]);
+
+    const events = await collect(createManusStream(fast)(MODEL, toolContext("fix a.ts")));
+
+    const end = events.find((event) => event.type === "toolcall_end");
+    expect(end.toolCall).toMatchObject({ type: "toolCall", name: "read", arguments: { path: "a.ts" } });
+    expect(events.at(-1)).toMatchObject({ type: "done", reason: "toolUse" });
+  });
+
+  it("keeps the prose around the call and drops the block itself", async () => {
+    const now = Date.now();
+    queueResponses([
+      { ok: true, task_id: "t1" },
+      poll(status("running", now + 10), assistant(`Reading it.\n\n${fenced('{"tool": "read", "arguments": {"path": "a.ts"}}')}`, now + 20)),
+    ]);
+
+    const events = await collect(createManusStream(fast)(MODEL, toolContext("fix a.ts")));
+
+    expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual(["Reading it."]);
+  });
+
+  it("stops polling at the call instead of waiting for the task to finish", async () => {
+    const now = Date.now();
+    const spy = queueResponses([
+      { ok: true, task_id: "t1" },
+      poll(status("running", now + 10), assistant(fenced('{"tool": "read", "arguments": {}}'), now + 20)),
+    ]);
+
+    await collect(createManusStream(fast)(MODEL, toolContext("fix a.ts")));
+
+    // task.create plus one poll: no further request goes out once the call is in hand.
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends the tool catalog and protocol to the new task", async () => {
+    const now = Date.now();
+    const spy = queueResponses([{ ok: true, task_id: "t1" }, poll(status("stopped", now + 10))]);
+
+    await collect(createManusStream(fast)(MODEL, toolContext("fix a.ts")));
+
+    const body = JSON.parse(spy.mock.calls[0][1].body).message.content;
+    expect(body).toContain("```tool_call");
+    expect(body).toContain("### read");
+  });
+
+  it("answers as a plain text model when bridging is off", async () => {
+    const now = Date.now();
+    queueResponses([
+      { ok: true, task_id: "t1" },
+      poll(status("running", now + 10), assistant(fenced('{"tool": "read", "arguments": {}}'), now + 20), status("stopped", now + 30)),
+    ]);
+
+    const events = await collect(createManusStream({ ...fast, bridgeTools: false })(MODEL, toolContext("fix a.ts")));
+
+    expect(events.some((event) => event.type === "toolcall_end")).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop" });
+  });
+
+  it("delivers the tool result to the same task on the next turn", async () => {
+    const now = Date.now();
+    queueResponses([
+      { ok: true, task_id: "t1" },
+      poll(status("running", now + 10), assistant(fenced('{"tool": "read", "arguments": {"path": "a.ts"}}'), now + 20)),
+    ]);
+    const first = toolContext("fix a.ts");
+    await collect(createManusStream(fast)(MODEL, first));
+
+    const spy = queueResponses([{ ok: true }, poll(status("stopped", now + 100))]);
+    const next = {
+      ...first,
+      messages: [
+        ...first.messages,
+        { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "read", arguments: {} }], timestamp: 2 },
+        { role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "export const a = 1;" }], isError: false, timestamp: 3 },
+      ],
+    } as any;
+    await collect(createManusStream(fast)(MODEL, next));
+
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toContain("/v2/task.sendMessage");
+    const body = JSON.parse(init.body);
+    expect(body.task_id).toBe("t1");
+    expect(body.message.content).toContain("Tool result (read):\nexport const a = 1;");
+  });
+});

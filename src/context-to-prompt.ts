@@ -8,9 +8,12 @@
 
 import type { Context, Message } from "@earendil-works/pi-ai";
 
+import { renderToolCatalog, toolProtocolPreamble, toolProtocolReminder, truncateToolResult } from "./tool-bridge.ts";
+
 /**
  * Manus runs in its own cloud sandbox and cannot touch the caller's filesystem. Without
  * this preamble it accepts local-file requests and then narrates work it cannot do.
+ * Used when no tools are bridged; with the bridge on, the tool protocol replaces it.
  */
 const ENVIRONMENT_PREAMBLE = [
   "You are answering inside a developer's terminal coding agent (Prime Agent).",
@@ -51,7 +54,7 @@ function renderMessage(message: Message): string {
     }
     case "toolResult": {
       const label = message.isError ? "Tool error" : "Tool result";
-      return `${label} (${message.toolName}): ${textOf(message.content)}`;
+      return `${label} (${message.toolName}):\n${truncateToolResult(textOf(message.content))}`;
     }
     default:
       return "";
@@ -71,6 +74,11 @@ export interface PromptOptions {
    * its own tool environment, and Manus reads that as an attachment it should open.
    */
   includeSystemPrompt?: boolean;
+  /**
+   * Describe the caller's tools and the calling protocol, so Manus can act on the user's
+   * machine through the host. Off means Manus answers as a text model.
+   */
+  bridgeTools?: boolean;
 }
 
 /**
@@ -87,9 +95,13 @@ export function buildPromptSlice(context: Context, alreadySent = 0, options: Pro
     ? messages
     : messages.slice(alreadySent).filter((message) => message.role !== "assistant");
 
+  const tools = context.tools ?? [];
+  const bridging = Boolean(options.bridgeTools) && tools.length > 0;
+
   const sections: string[] = [];
   if (isFirstTurn) {
-    sections.push(ENVIRONMENT_PREAMBLE);
+    sections.push(bridging ? toolProtocolPreamble() : ENVIRONMENT_PREAMBLE);
+    if (bridging) sections.push(renderToolCatalog(tools));
     if (options.includeSystemPrompt && context.systemPrompt) {
       sections.push(`System instructions from the caller:\n${context.systemPrompt}`);
     }
@@ -97,6 +109,9 @@ export function buildPromptSlice(context: Context, alreadySent = 0, options: Pro
 
   const transcript = pending.map(renderMessage).filter(Boolean).join("\n\n");
   if (transcript) sections.push(transcript);
+  // Restated every turn, and last, because Manus drifts back to plain prose several turns
+  // after the protocol was stated at task creation.
+  if (bridging && !isFirstTurn) sections.push(toolProtocolReminder());
 
   return { text: sections.join("\n\n---\n\n"), covered: messages.length };
 }

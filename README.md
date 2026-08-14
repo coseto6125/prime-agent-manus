@@ -12,12 +12,22 @@ which presents Manus's asynchronous task API as an ordinary assistant stream.
 
 ## Read this before installing
 
-**Manus answers; it does not use your tools.** The Manus API accepts no caller-supplied tool or
-function definitions, and Manus works inside its own cloud sandbox with no access to your machine.
-Through this provider Manus behaves as a knowledgeable text model: it will not read your files, run
-your tests, or edit your repository, whatever the surrounding agent's system prompt says.
+**Manus edits your repository through Prime Agent's tools.** The Manus API accepts no tool
+definitions and Manus lives in its own cloud sandbox, so this provider bridges the two: the tools
+Prime Agent offers are described in the prompt, a reply that asks for one ends the turn as a tool
+turn, Prime Agent runs it on your machine, and the result goes back to the same Manus task. Manus
+reasons, your machine acts. It reads files, runs commands, edits code, and checks its own work,
+the way any coding agent does.
 
-Use it for research, review, explanation, and planning. Keep a real coding model selected for edits.
+Two things follow from bridging rather than native tool calling:
+
+- **The tool call is parsed out of prose**, so a reply that ignores the protocol just reads as
+  text. It recovers on the next turn; it does not corrupt anything.
+- **One call per turn.** Manus often plans several steps in one reply. The first runs, the rest
+  are dropped and proposed again with the result in hand.
+
+Set `MANUS_TOOL_BRIDGE=0` for the earlier behaviour, where Manus answers as a text model and
+touches nothing.
 
 ## Install
 
@@ -59,6 +69,7 @@ run `/reload`.
 |---|---|
 | `MANUS_API_KEY` | API key. Required unless set through provider config. |
 | `MANUS_PROJECT_ID` | Files every task under a Manus project instead of your personal task list. |
+| `MANUS_TOOL_BRIDGE` | `0` turns off tool bridging, leaving Manus as a text model. |
 
 Model ids are Manus `agent_profile` values. `manus-1.6-lite` is cheaper and faster; a short question
 answers in roughly 7 to 10 seconds. Read the next section before choosing anything else.
@@ -145,9 +156,28 @@ than a truncated answer that looks finished:
 The exception is `messageAskUser`, where the agent just asked you something. Its question is already
 in the reply, so answering on the next turn resumes the task.
 
+## How tool bridging works
+
+The first message of a task carries the protocol and a catalog of every tool Prime Agent offers,
+each with its JSON Schema. Later turns carry a one-line reminder, because a long task drifts back
+to plain prose without it.
+
+A reply is scanned for a call in three forms, in this order: a fenced ` ```tool_call ` block, any
+fenced block whose JSON names a tool, and a bare `{"tool": …}` object written straight into the
+prose. Raw newlines inside a JSON string are escaped before parsing, since a call carrying a shell
+script or a Python snippet is otherwise not valid JSON.
+
+When one is found the turn ends there with `stopReason: "toolUse"`, and polling stops rather than
+waiting for the Manus task to finish. Prime Agent runs the tool and the result reaches the same
+task through `task.sendMessage`, so Manus keeps its own history across the whole loop.
+
+The preamble spends most of its words on one thing: Manus must not do the work in its own sandbox.
+Without that, it edits a file that only exists on its side and reports success for a change your
+repository never received.
+
 ## Limits
 
-- **No tool calling.** See above. Prime Agent's tool definitions are dropped.
+- **No parallel tool calls.** One call per turn, by construction.
 - **No token usage or cost.** Manus bills in credits, not tokens, and returns no token counts, so
   the cost readout stays at zero. Check credit usage in the Manus dashboard.
 - **Text-only input.** Images you send are replaced with a placeholder.
@@ -171,11 +201,11 @@ rejects an API key with "token contains an invalid number of segments".
 
 ## Roadmap
 
-Bridging tools through `structured_output_schema` is the obvious next step: describe the caller's
-tools as a strict schema, and translate a structured reply into a `toolCall` event. Manus returns
-structured results in a dedicated `structured_output_result` message, so the plumbing works. The
-open question is behavioural, not technical, since an autonomous agent prefers to finish the job
-itself rather than stop and ask the caller to run one step.
+`structured_output_schema` is the stricter way to carry a tool call. A schema of
+`{tool, arguments}` would come back in a dedicated `structured_output_result` message instead of
+being parsed out of prose. What stops it today is that the schema is fixed when the task is
+created, so it also constrains every plain answer in the same task. Splitting a turn into a
+free-text task and a schema-bound one costs an extra task per step.
 
 ## Development
 

@@ -69,7 +69,7 @@ describe("buildPromptSlice", () => {
       ],
     } as any;
 
-    expect(buildPromptSlice(context).text).toContain("Tool result (read_file): version 1.2.3");
+    expect(buildPromptSlice(context).text).toContain("Tool result (read_file):\nversion 1.2.3");
   });
 
   it("labels failed tool results as errors", () => {
@@ -86,7 +86,45 @@ describe("buildPromptSlice", () => {
       ],
     } as any;
 
-    expect(buildPromptSlice(context).text).toContain("Tool error (bash): command not found");
+    expect(buildPromptSlice(context).text).toContain("Tool error (bash):\ncommand not found");
+  });
+
+  it("swaps the sandbox preamble for the tool protocol when tools are bridged", () => {
+    const context = {
+      messages: [userMessage("fix the bug")],
+      tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
+    } as any;
+
+    const slice = buildPromptSlice(context, 0, { bridgeTools: true });
+
+    expect(slice.text).toContain("```tool_call");
+    expect(slice.text).toContain("### read");
+    expect(slice.text).not.toContain("NOT running on the user's machine");
+  });
+
+  it("keeps the sandbox preamble when the caller sends no tools", () => {
+    const slice = buildPromptSlice({ messages: [userMessage("hi")] } as any, 0, { bridgeTools: true });
+
+    expect(slice.text).toContain("NOT running on the user's machine");
+  });
+
+  it("sends the catalog once but restates the call format every turn", () => {
+    const context = {
+      messages: [userMessage("first"), assistantMessage("answer"), userMessage("second")],
+      tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
+    } as any;
+
+    const text = buildPromptSlice(context, 2, { bridgeTools: true }).text;
+
+    expect(text).toContain("User: second");
+    expect(text).not.toContain("### read");
+    expect(text).toContain("```tool_call");
+  });
+
+  it("adds no reminder when nothing is bridged", () => {
+    const context = { messages: [userMessage("first"), assistantMessage("a"), userMessage("second")] } as any;
+
+    expect(buildPromptSlice(context, 2, { bridgeTools: true }).text).toBe("User: second");
   });
 });
 

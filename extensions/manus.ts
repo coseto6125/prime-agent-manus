@@ -76,6 +76,9 @@ export default function (pi: ExtensionAPI): void {
     oauth: manusLogin,
     streamSimple: createManusStream({
       projectId: process.env.MANUS_PROJECT_ID,
+      // Tool bridging is what lets Manus edit the repository. Set MANUS_TOOL_BRIDGE=0 to get
+      // the plain text model back.
+      bridgeTools: process.env.MANUS_TOOL_BRIDGE !== "0",
     }),
     models: MODELS,
   });
