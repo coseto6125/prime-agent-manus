@@ -1,0 +1,35 @@
+{
+  "name": "prime-agent-manus",
+  "version": "0.1.0",
+  "description": "Use Manus as a model provider inside Prime Agent and pi",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "prime-agent",
+    "manus",
+    "provider"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.2",
+    "vitest": "^3.2.7"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "files": [
+    "extensions",
+    "src",
+    "README.md",
+    "LICENSE"
+  ]
+}
