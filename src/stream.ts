@@ -34,6 +34,8 @@ export interface ManusStreamSettings {
   includeSystemPrompt?: boolean;
   /** How long a new task may stay unreadable before it is reported as never created. */
   ghostTaskGraceMs?: number;
+  /** How long network errors and 5xx are ridden out before the turn fails. */
+  transientGraceMs?: number;
 }
 
 interface TaskSession {
@@ -45,9 +47,31 @@ interface TaskSession {
 /** Conversation key to live Manus task. Lets a multi-turn chat stay inside one task. */
 const sessions = new Map<string, TaskSession>();
 
+/**
+ * Cap on remembered conversations. Prime Agent can run as a long-lived daemon, where an
+ * unbounded map would keep every conversation it ever saw. Map preserves insertion order,
+ * so re-inserting on each use makes the first key the least recently used one.
+ */
+const MAX_SESSIONS = 100;
+
+function rememberSession(key: string, session: TaskSession): void {
+  sessions.delete(key);
+  sessions.set(key, session);
+  while (sessions.size > MAX_SESSIONS) {
+    const oldest = sessions.keys().next().value;
+    if (oldest === undefined) break;
+    sessions.delete(oldest);
+  }
+}
+
 /** Exposed for tests; a fresh process starts empty anyway. */
 export function resetSessions(): void {
   sessions.clear();
+}
+
+/** Exposed for tests that need to observe eviction. */
+export function sessionCount(): number {
+  return sessions.size;
 }
 
 const DEFAULTS = {
@@ -58,6 +82,9 @@ const DEFAULTS = {
 
 /** Default window a freshly created task may stay unreadable before it counts as never created. */
 const GHOST_TASK_GRACE_MS = 15_000;
+
+/** Default window of network errors and 5xx to ride out before failing the turn. */
+const TRANSIENT_GRACE_MS = 60_000;
 
 /**
  * `task.create` can answer with a task id for a task it never creates. Observed for every
@@ -129,6 +156,7 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
   const maxPollIntervalMs = settings.maxPollIntervalMs ?? DEFAULTS.maxPollIntervalMs;
   const taskTimeoutMs = settings.taskTimeoutMs ?? DEFAULTS.taskTimeoutMs;
   const ghostTaskGraceMs = settings.ghostTaskGraceMs ?? GHOST_TASK_GRACE_MS;
+  const transientGraceMs = settings.transientGraceMs ?? TRANSIENT_GRACE_MS;
 
   return function streamManus(
     model: Model<any>,
@@ -182,7 +210,21 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
         const sentAt = Date.now();
         if (existing) {
           activeTaskId = existing.taskId;
-          await client.sendMessage(existing.taskId, slice.text, signal);
+          try {
+            await client.sendMessage(existing.taskId, slice.text, signal);
+          } catch (error) {
+            // The task went away (deleted, or it never really existed). Forget it so the next
+            // attempt starts a fresh one instead of retrying against the same dead id.
+            if (error instanceof ManusApiError && error.code === "not_found") {
+              sessions.delete(key);
+              throw new ManusApiError(
+                `The Manus task for this conversation (${existing.taskId}) no longer exists. Send the message again to start a new one.`,
+                404,
+                "not_found",
+              );
+            }
+            throw error;
+          }
         } else {
           const created = await client.createTask({
             content: slice.text,
@@ -194,12 +236,15 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
           });
           activeTaskId = created.task_id;
         }
-        sessions.set(key, { taskId: activeTaskId, covered: slice.covered });
+        // Deliberately not cached yet: a task that never becomes readable must not be remembered,
+        // or the next turn sends follow-ups to an id that does not exist.
+        let sessionCached = false;
 
         let contentIndex = -1;
         let lastSeenTimestamp = sentAt - 1;
         let interval = pollIntervalMs;
         let unreadableSinceMs = 0;
+        let failingSinceMs = 0;
         const deadline = Date.now() + taskTimeoutMs;
 
         while (true) {
@@ -215,15 +260,29 @@ export function createManusStream(settings: ManusStreamSettings = {}) {
           try {
             messages = await client.listMessages(activeTaskId, signal);
           } catch (error) {
+            if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
+
             // A brand new task can lag by a poll or two; one that never appears was never created.
             if (error instanceof ManusApiError && error.code === "not_found") {
               unreadableSinceMs ||= Date.now();
               if (Date.now() - unreadableSinceMs >= ghostTaskGraceMs) throw ghostTaskError(activeTaskId, model.id);
               continue;
             }
-            throw error;
+
+            // A task can run for minutes. Dropping the answer over one blip wastes the whole run,
+            // so ride out network errors and 5xx, while 4xx (bad key, bad request) fails now.
+            const transient = !(error instanceof ManusApiError) || error.status >= 500;
+            if (!transient) throw error;
+            failingSinceMs ||= Date.now();
+            if (Date.now() - failingSinceMs >= transientGraceMs) throw error;
+            continue;
           }
           unreadableSinceMs = 0;
+          failingSinceMs = 0;
+          if (!sessionCached) {
+            rememberSession(key, { taskId: activeTaskId, covered: slice.covered });
+            sessionCached = true;
+          }
           const fresh = newAssistantText(messages, lastSeenTimestamp);
 
           for (const entry of fresh) {

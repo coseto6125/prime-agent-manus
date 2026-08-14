@@ -144,6 +144,11 @@ export class ManusClient {
     return payload.messages ?? [];
   }
 
+  /** Credit balance for the key's caller. Cheap, so it doubles as an API-key check. */
+  availableCredits(signal?: AbortSignal): Promise<{ total_credits?: number; free_credits?: number }> {
+    return this.request("/v2/usage.availableCredits", { method: "GET", signal });
+  }
+
   async stopTask(taskId: string): Promise<void> {
     // Best-effort: abandoning a task must never mask the original abort.
     await this.request("/v2/task.stop", { method: "POST", body: { task_id: taskId } }).catch(() => undefined);

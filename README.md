@@ -23,17 +23,18 @@ Use it for research, review, explanation, and planning. Keep a real coding model
 
 ```bash
 prime-agent package install git:github.com/coseto6125/prime-agent-manus
-export MANUS_API_KEY=sk-...
 ```
 
-Try it without installing:
+Then authenticate. Create a key at the [Manus API console](https://open.manus.ai) and pick one of:
 
-```bash
-prime-agent -e git:github.com/coseto6125/prime-agent-manus --provider manus --model manus-1.6-lite
-```
+**`/login` (recommended).** In the TUI, run `/login`, choose **Manus (API key)**, and paste the key.
+It is checked against the API on entry and stored in `~/.prime/agent/auth.json`, so nothing lives in
+your shell profile. `/login manus` jumps straight to it.
 
-Get an API key from the [Manus API console](https://open.manus.ai). Instead of the environment
-variable you can set the key in `~/.prime/agent/models.json`, including the `!command` form:
+**Environment variable.** `export MANUS_API_KEY=sk-...` before launch.
+
+**Provider config.** `~/.prime/agent/models.json`, which also takes the `!command` form so the key
+can stay in a password manager:
 
 ```json
 {
@@ -42,6 +43,15 @@ variable you can set the key in `~/.prime/agent/models.json`, including the `!co
   }
 }
 ```
+
+Try it without installing:
+
+```bash
+prime-agent -e git:github.com/coseto6125/prime-agent-manus --provider manus --model manus-1.6-lite
+```
+
+Extensions load when Prime Agent starts, so after installing or updating this package, restart it or
+run `/reload`.
 
 ## Configuration
 
@@ -53,22 +63,35 @@ variable you can set the key in `~/.prime/agent/models.json`, including the `!co
 Model ids are Manus `agent_profile` values. `manus-1.6-lite` is cheaper and faster; a short question
 answers in roughly 7 to 10 seconds. Read the next section before choosing anything else.
 
-## manus-1.6 and manus-1.6-max may not work at all
+## Check which profiles your account can actually create
 
 On the account this was built against, `task.create` returns `ok: true` with a `task_id` for every
-profile, but **only `manus-1.6-lite` produces a task that actually exists**. For `manus-1.6` (which
-is also the API default) and `manus-1.6-max`, the returned id is unknown to `task.detail` and
-`task.listMessages` forever, and the task never appears in `task.list` — not even when filtering by
-the creating `api_key_id`. Verified across interleaved runs of both profiles minutes apart, before
-and after a credit refresh, with both accepted auth headers.
+profile, but only `manus-1.6-lite` produced a task that exists. For `manus-1.6` (also the API
+default) and `manus-1.6-max`, the returned id stayed unknown to `task.detail` and `task.listMessages`
+indefinitely, and the task never appeared in `task.list`, not even when filtering by the creating
+`api_key_id`.
 
-The API reference notes that "free personal accounts are downgraded to `manus-1.6-lite` regardless
-of the requested value", so this looks like that downgrade path failing instead of downgrading.
-Whether paid accounts are affected is untested.
+Nothing is blocked client-side, so if the other profiles work for you they work here. Check yours in
+two commands:
 
-Rather than surfacing a bare `task not found`, this extension polls for a grace period and then
-fails with a message naming the cause and pointing at `manus-1.6-lite`. If the non-lite profiles
-work on your account, they work here too; nothing is blocked client-side.
+```bash
+TASK=$(curl -s -X POST https://api.manus.ai/v2/task.create \
+  -H "x-manus-api-key: $MANUS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"message":{"content":"hi"},"agent_profile":"manus-1.6","hide_in_task_list":true}' \
+  | grep -o '"task_id":"[^"]*"' | cut -d'"' -f4)
+sleep 10 && curl -s "https://api.manus.ai/v2/task.detail?task_id=$TASK" -H "x-manus-api-key: $MANUS_API_KEY"
+```
+
+`ok: true` means the profile works for you. `task not found` means you hit the same thing.
+
+**A live task hides this.** A Manus task's `agent_profile` is fixed when it is created, and follow-up
+turns go to `task.sendMessage`, which works regardless of the model currently selected. So switching
+to `manus-1.6` mid-conversation can look like it works while the reply still comes from the original
+task. This extension keys its task cache on model id to prevent that, but it is worth knowing when
+reading anyone else's report of the behaviour, including your own.
+
+When a created task never becomes readable, the turn fails with a message naming the cause instead of
+a bare `task not found`.
 
 ## How it works
 

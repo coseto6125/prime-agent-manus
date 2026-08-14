@@ -91,3 +91,20 @@ describe("latestAgentStatus", () => {
     expect(latestAgentStatus([{ id: "m1", timestamp: "1", type: "user_message", user_message: { content: "hi" } }])).toBeUndefined();
   });
 });
+
+describe("availableCredits", () => {
+  it("reads the credit balance, which doubles as an API-key check", async () => {
+    const spy = mockFetch(200, { ok: true, total_credits: 1221, free_credits: 921 });
+
+    const credits = await new ManusClient("sk-test").availableCredits();
+
+    expect(spy.mock.calls[0][0]).toBe("https://api.manus.ai/v2/usage.availableCredits");
+    expect(credits.total_credits).toBe(1221);
+  });
+
+  it("rejects a bad key so /login can fail at entry time", async () => {
+    mockFetch(401, { ok: false, error: { code: "unauthenticated", message: "invalid token" } });
+
+    await expect(new ManusClient("bad").availableCredits()).rejects.toBeInstanceOf(ManusApiError);
+  });
+});

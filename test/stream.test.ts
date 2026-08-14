@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createManusStream, newAssistantText, resetSessions } from "../src/stream.ts";
+import { createManusStream, newAssistantText, resetSessions, sessionCount } from "../src/stream.ts";
 import type { ManusMessage } from "../src/manus-client.ts";
 
 const MODEL = {
@@ -219,6 +219,132 @@ describe("createManusStream", () => {
     );
 
     expect(events.at(-1).error.errorMessage).toContain("still running");
+  });
+});
+
+describe("dead task handling", () => {
+  const fast = { apiKey: "sk-test", pollIntervalMs: 1, maxPollIntervalMs: 1 };
+  const notFound = { ok: false, error: { code: "not_found", message: "task not found" } };
+
+  it("does not cache a task that never became readable", async () => {
+    const now = Date.now();
+    const spy = vi.fn();
+    spy.mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, task_id: "ghost" }) });
+    spy.mockResolvedValueOnce({ ok: false, status: 404, text: async () => JSON.stringify(notFound) });
+    spy.mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, task_id: "real" }) });
+    spy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(poll(assistant("second try", now + 10), status("stopped", now + 20))),
+    });
+    vi.stubGlobal("fetch", spy);
+
+    const stream = createManusStream({ ...fast, ghostTaskGraceMs: 0 });
+    await collect(stream(MODEL, context("q")));
+    const events = await collect(stream(MODEL, context("q")));
+
+    const urls = spy.mock.calls.map((call) => String(call[0]));
+    expect(urls.filter((url) => url.endsWith("/v2/task.create"))).toHaveLength(2);
+    expect(urls.some((url) => url.endsWith("/v2/task.sendMessage"))).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop" });
+  });
+
+  it("explains a follow-up sent to a task that no longer exists", async () => {
+    const now = Date.now();
+    const spy = vi.fn();
+    spy.mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, task_id: "t1" }) });
+    spy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(poll(assistant("first", now + 10), status("stopped", now + 20))),
+    });
+    spy.mockResolvedValue({ ok: false, status: 404, text: async () => JSON.stringify(notFound) });
+    vi.stubGlobal("fetch", spy);
+
+    const stream = createManusStream(fast);
+    await collect(stream(MODEL, context("q")));
+
+    const followUp = {
+      messages: [
+        { role: "user" as const, content: "q", timestamp: 1 },
+        { role: "user" as const, content: "again", timestamp: 2 },
+      ],
+    } as any;
+    const events = await collect(stream(MODEL, followUp));
+
+    expect(events.at(-1).error.errorMessage).toContain("no longer exists");
+    expect(sessionCount()).toBe(0);
+  });
+});
+
+describe("resilience", () => {
+  const fast = { apiKey: "sk-test", pollIntervalMs: 1, maxPollIntervalMs: 1 };
+  const serverError = { ok: false, error: { code: "internal", message: "upstream exploded" } };
+
+  it("rides out a 5xx blip and still delivers the answer", async () => {
+    const now = Date.now();
+    const spy = vi.fn();
+    spy.mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, task_id: "t1" }) });
+    spy.mockResolvedValueOnce({ ok: false, status: 503, text: async () => JSON.stringify(serverError) });
+    spy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(poll(assistant("survived", now + 10), status("stopped", now + 20))),
+    });
+    vi.stubGlobal("fetch", spy);
+
+    const events = await collect(createManusStream({ ...fast, transientGraceMs: 5_000 })(MODEL, context("q")));
+
+    expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop" });
+    expect(events.at(-1).message.content).toEqual([{ type: "text", text: "survived" }]);
+  });
+
+  it("gives up once the transient window closes", async () => {
+    const spy = vi.fn();
+    spy.mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, task_id: "t1" }) });
+    spy.mockResolvedValue({ ok: false, status: 503, text: async () => JSON.stringify(serverError) });
+    vi.stubGlobal("fetch", spy);
+
+    const events = await collect(createManusStream({ ...fast, transientGraceMs: 20 })(MODEL, context("q")));
+
+    expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
+    expect(events.at(-1).error.errorMessage).toContain("upstream exploded");
+  });
+
+  it("fails immediately on a 4xx, which retrying cannot fix", async () => {
+    const spy = vi.fn();
+    spy.mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, task_id: "t1" }) });
+    spy.mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => JSON.stringify({ ok: false, error: { code: "unauthenticated", message: "bad key" } }),
+    });
+    vi.stubGlobal("fetch", spy);
+
+    const events = await collect(createManusStream({ ...fast, transientGraceMs: 60_000 })(MODEL, context("q")));
+
+    expect(events.at(-1).error.errorMessage).toContain("bad key");
+  });
+
+  it("evicts the oldest conversation instead of growing without bound", async () => {
+    const now = Date.now();
+    const spy = vi.fn();
+    spy.mockImplementation(async (url: string) => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify(
+          String(url).endsWith("/v2/task.create")
+            ? { ok: true, task_id: "t" }
+            : poll(assistant("ok", now + 10), status("stopped", now + 20)),
+        ),
+    }));
+    vi.stubGlobal("fetch", spy);
+
+    const stream = createManusStream(fast);
+    for (let i = 0; i < 105; i += 1) await collect(stream(MODEL, context(`conversation ${i}`)));
+
+    expect(sessionCount()).toBe(100);
   });
 });
 
